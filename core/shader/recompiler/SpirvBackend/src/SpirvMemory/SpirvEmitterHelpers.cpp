@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "Optimization/ResourceMaterializer.hpp"
 #include "BdaAbi.hpp"
 #include "PipelineSpecialization.hpp"
@@ -360,6 +361,18 @@ void DefineOutputs(SpirvEmitterState& state) {
             binding.variableId = BuiltIn(state.sampleMaskVariable, SampleMaskArrayType(state), "gl_SampleMask", spv::BuiltInSampleMask);
             break;
         case StageOutputKind::StencilRef:
+            if (std::find(state.supportedCapabilities.begin(), state.supportedCapabilities.end(), static_cast<std::uint32_t>(spv::CapabilityStencilExportEXT)) == state.supportedCapabilities.end()) {
+                // Without VK_EXT_shader_stencil_export (NVIDIA on Windows) the exported stencil
+                // reference is dropped: it lands in a private variable and the pipeline's static
+                // reference is used instead, so the draw renders rather than ending the title.
+                static bool told = false;
+                if (!told) {
+                    told = true;
+                    std::fprintf(stderr, "[shader] stencil reference export dropped: the device lacks VK_EXT_shader_stencil_export; the pipeline's reference is used\n");
+                }
+                binding.variableId = state.module.DefineGlobalVariable(TypePointer(state, spv::StorageClassPrivate, TypeI32(state)), spv::StorageClassPrivate);
+                break;
+            }
             binding.variableId = BuiltIn(state.stencilRefVariable, TypeI32(state), "gl_FragStencilRefARB", spv::BuiltInFragStencilRefEXT);
             break;
         case StageOutputKind::Parameter:
