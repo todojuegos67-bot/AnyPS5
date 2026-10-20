@@ -9538,6 +9538,21 @@ void Run(Context context) {
         if (watched) {
             AgcDriver::GuestMemory::Unwatch(address, SurfaceBytes);
             Require(!AgcDriver::GuestMemory::Watched(address, SurfaceBytes), "snapshot fixture is still write-watched");
+            // Results land after the unwatch hook had nothing pending to save: the unit has neither
+            // saved bytes nor a watch, and is stored whole.
+            {
+                CommandBatch batch(context);
+                RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+                VkClearColorValue clear{};
+                clear.uint32[0] = 0xafafafafu;
+                const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(batch.Handle(), image->Image(), VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &range);
+                batch.SubmitAndWait();
+            }
+            image->MarkDirty();
+            image->WriteBack();
+            AgcDriver::GuestMemory::ReadCommitted(address, std::as_writable_bytes(std::span(&pixel, 1)));
+            Require(pixel == 0xafafafafu, "a write-back outside the write watch without saved guest bytes lost GPU texels");
             std::memset(reinterpret_cast<void*>(address), 0x8d, SurfaceBytes);
             image->Refresh();
             Require(image->OriginalSnapshotBytes() == SurfaceBytes, "unwatched refresh did not allocate its comparison snapshot");
