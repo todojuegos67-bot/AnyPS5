@@ -1947,7 +1947,7 @@ std::string AddressCopyOverflow(std::vector<AddressCopy> copies, std::uint64_t l
     for (const auto& copy : copies) total += copy.committed;
     if (total <= limit) return {};
     std::sort(copies.begin(), copies.end(), [](const AddressCopy& left, const AddressCopy& right) { return left.committed > right.committed; });
-    char text[256];
+    char text[384];
     std::snprintf(text, sizeof(text), "an address-based build copies %llu MiB of %zu registered ranges, past %llu MiB (APS5_ADDRESS_COPY_MAX_MIB); the largest:", static_cast<unsigned long long>(total >> 20u), copies.size(), static_cast<unsigned long long>(limit >> 20u));
     std::string message = text;
     for (std::size_t index = 0; index < copies.size() && index < 8; ++index) {
@@ -2274,6 +2274,34 @@ bool HostImportCovers(const Context& context, std::uint64_t address, std::size_t
 
 GuestBufferMemory::GuestBufferMemory(const Context& context) : context(context) {}
 
+namespace {
+
+// Why a whole committed range ends up copied per build: the import and the write watch each turned it
+// down, and which of their reasons applies decides the fix (a hole of the arena, an Unwatch, a refused import).
+const char* copiedRangeReason(bool importable, std::uint64_t address, std::uint64_t bytes) {
+    bool importFailed = false;
+    if (importable) {
+        auto& state = Imports();
+        std::lock_guard lock(state.mutex);
+        auto failed = state.failed.upper_bound(address);
+        if (failed != state.failed.begin()) {
+            --failed;
+            importFailed = failed->second.base + failed->second.bytes > address;
+        }
+    }
+#ifdef _WIN32
+    const bool hostRegion = GuestArena::GuestArenaHostRegionOverlaps_nid_postfix(static_cast<std::uintptr_t>(address), static_cast<std::size_t>(bytes));
+#else
+    const bool hostRegion = false;
+    static_cast<void>(bytes);
+#endif
+    if (!importable) return hostRegion ? "no host import; overlaps a host region of the arena" : "no host import; outside the write-watched arena";
+    if (importFailed) return hostRegion ? "host import refused (uncommitted, guarded, read-only or driver failure); overlaps a host region of the arena" : "host import refused (uncommitted, guarded, read-only or driver failure); outside the write-watched arena";
+    return hostRegion ? "host import declined (budget or held); overlaps a host region of the arena" : "host import declined (budget or held); outside the write-watched arena";
+}
+
+}
+
 bool GuestBufferMemory::WritesOverlap(std::uint64_t address, std::size_t bytes) const {
     return std::any_of(writes.begin(), writes.end(), [&](const auto& range) { return address < range.second && range.first < address + bytes; });
 }
@@ -2443,7 +2471,7 @@ void GuestBufferMemory::AcquireRegistered() {
                 committed = 0;
                 for (const auto& [first, last] : copied.backed) committed += last - first;
             }
-            const char* reason = !mirrorsEnabled() ? "mirrors disabled by APS5_NO_LEASE_MIRROR" : copied.sparse ? "unreadable pages" : !range->releasable ? "image mirror refused" : "outside the write-watched arena";
+            const char* reason = !mirrorsEnabled() ? "mirrors disabled by APS5_NO_LEASE_MIRROR" : copied.sparse ? "unreadable pages" : !range->releasable ? "image mirror refused" : copiedRangeReason(importable, range->address, range->bytes);
             copies.push_back({copied.begin, copied.end, committed, reason});
         }
         releaseImportedMirrors(context, imported);
